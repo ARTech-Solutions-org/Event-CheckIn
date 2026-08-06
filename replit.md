@@ -1,15 +1,16 @@
-# [Project name]
+# Gatepass — QR Code Event Check-in System
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A mobile-first web app for event check-in using QR code scanning. Organizers log in, scan attendee QR codes, prevent duplicate check-ins, and monitor live attendance counts.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- **API Server** workflow — `PORT=8080 pnpm --filter @workspace/api-server run dev` (port 8080)
+- **Start application** workflow — `PORT=5000 BASE_PATH=/ pnpm --filter @workspace/event-checkin run dev` (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `NEON_DATABASE_URL` — Neon PostgreSQL connection string (set as Replit Secret)
 
 ## Stack
 

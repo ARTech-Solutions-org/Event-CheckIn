@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/reac
 import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { getGetCurrentUserQueryKey, getGetDashboardSummaryQueryKey, getListAttendeesQueryKey, useCheckIn, useGetCurrentUser, useGetDashboardSummary, useImportAttendees, useListAttendees, useLogin, useLogout } from '@workspace/api-client-react';
 import { AlertCircle, ArrowRight, BarChart3, Check, CheckCircle2, ChevronRight, ClipboardList, Download, FileUp, LogOut, Menu, QrCode, Search, Ticket, Users, X, XCircle } from 'lucide-react';
-import { BrowserMultiFormatReader } from '@zxing/browser';
+import { BinaryBitmap, BarcodeFormat, DecodeHintType, HybridBinarizer, MultiFormatReader, RGBLuminanceSource } from '@zxing/library';
 import QRCode from 'qrcode';
 import NotFound from '@/pages/not-found';
 
@@ -61,7 +61,7 @@ function Shell({ children, user }: { children: ReactNode; user: { displayName: s
   const [, setLocation] = useLocation();
   const logout = useLogout();
   const [menuOpen, setMenuOpen] = useState(false);
-  const nav = [{ href: '/', label: 'Scanner', icon: QrCode }, { href: '/dashboard', label: 'Live board', icon: BarChart3 }, { href: '/attendees', label: 'Attendees', icon: Users }];
+  const nav = [{ href: '/', label: 'Scanner', icon: QrCode }, { href: '/dashboard', label: 'Live board', icon: BarChart3 }, { href: '/attendees', label: 'Attendees', icon: Users }, { href: '/qr', label: 'QR Generator', icon: Download }];
   const signOut = () => logout.mutate(undefined, { onSuccess: () => { queryClient.setQueryData(getGetCurrentUserQueryKey(), undefined); setLocation('/'); } });
   return <div className="min-h-[100dvh] bg-background md:flex">
     <aside className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col bg-sidebar p-5 text-sidebar-foreground shadow-xl transition-transform md:static md:translate-x-0 ${menuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
@@ -85,10 +85,11 @@ function Scanner() {
   const scanLockedRef = useRef(false);
   const checkInRef = useRef(checkIn);
   checkInRef.current = checkIn;
+
   const submitQr = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed || scanLockedRef.current) return;
-    scanLockedRef.current = true;
+    scanLockedRef.current = true; // stays locked until user presses Scan Next
     checkInRef.current.mutate({ data: { qrId: trimmed } }, {
       onSuccess: (next) => {
         setResult(next);
@@ -96,44 +97,175 @@ function Scanner() {
         queryClient.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() });
         queryClient.invalidateQueries({ queryKey: getListAttendeesQueryKey() });
       },
-      onSettled: () => window.setTimeout(() => { scanLockedRef.current = false; }, 1400),
+      onError: () => {
+        setResult({ status: 'invalid', message: 'Something went wrong. Try again.' });
+        setQrId('');
+      },
     });
   };
+
+  const resetScan = () => { setResult(null); scanLockedRef.current = false; };
+
   useEffect(() => {
-    if (!navigator.mediaDevices?.getUserMedia || !videoRef.current) {
-      setCameraState('unsupported');
-      return;
-    }
-    const reader = new BrowserMultiFormatReader();
-    let controls: { stop: () => void } | undefined;
-    let cancelled = false;
-    reader.decodeFromConstraints(
-      { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-      videoRef.current,
-      (decoded) => {
-        if (decoded) submitQr(decoded.getText());
-      },
-    ).then((nextControls) => {
-      controls = nextControls;
-      if (!cancelled) setCameraState('ready');
-      else controls.stop();
-    }).catch(() => {
-      if (!cancelled) setCameraState('denied');
-    });
-    return () => {
-      cancelled = true;
-      controls?.stop();
+    if (!navigator.mediaDevices?.getUserMedia) { setCameraState('unsupported'); return; }
+    const video = videoRef.current;
+    if (!video) { setCameraState('unsupported'); return; }
+
+    let active = true;
+    let rafId: number;
+    let stream: MediaStream | null = null;
+
+    const stop = () => {
+      active = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      stream?.getTracks().forEach((t) => t.stop());
+      video.srcObject = null;
     };
+
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            frameRate: { ideal: 30 },
+          },
+        });
+        if (!active) { stream.getTracks().forEach((t) => t.stop()); return; }
+        video.srcObject = stream;
+        await video.play();
+        if (!active) return;
+        setCameraState('ready');
+
+        // ── Path 1: native BarcodeDetector (Android Chrome — fastest, any angle) ──
+        if ('BarcodeDetector' in window) {
+          const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
+          const loop = async () => {
+            if (!active) return;
+            if (video.readyState >= 2) {
+              try {
+                const codes: any[] = await detector.detect(video);
+                if (codes.length > 0) submitQr(codes[0].rawValue);
+              } catch { /* no code in frame */ }
+            }
+            if (active) rafId = requestAnimationFrame(loop);
+          };
+          rafId = requestAnimationFrame(loop);
+          return;
+        }
+
+        // ── Path 2: ZXing with TRY_HARDER + rAF loop ──
+        const hints = new Map<DecodeHintType, any>();
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE]);
+        hints.set(DecodeHintType.TRY_HARDER, true); // better angle & distance tolerance
+        const zxing = new MultiFormatReader();
+        zxing.setHints(hints);
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+
+        const loop = () => {
+          if (!active) return;
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            try {
+              const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const lum = new RGBLuminanceSource(data as unknown as Uint8ClampedArray, canvas.width, canvas.height);
+              const result = zxing.decode(new BinaryBitmap(new HybridBinarizer(lum)));
+              submitQr(result.getText());
+            } catch { /* no code in frame */ }
+          }
+          rafId = requestAnimationFrame(loop);
+        };
+        rafId = requestAnimationFrame(loop);
+
+      } catch {
+        if (active) setCameraState('denied');
+      }
+    })();
+
+    return stop;
   }, []);
+
   const submit = (event?: FormEvent) => { event?.preventDefault(); submitQr(qrId); };
   const status = result?.status;
-  return <main className="mx-auto max-w-6xl p-5 pb-12 sm:p-8 lg:p-12"><div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="mb-2 font-mono text-[10px] uppercase tracking-[.2em] text-primary">Entrance / Main gate</p><h1 className="font-display text-4xl font-bold tracking-[-.045em] sm:text-5xl">Scanner<span className="text-primary">.</span></h1><p className="mt-2 text-sm text-muted-foreground">Point at a guest’s code or enter their ID below.</p></div><div className="flex items-center gap-2 rounded-full border border-accent/25 bg-accent/10 px-3 py-2 font-mono text-[10px] uppercase tracking-[.12em] text-accent"><span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> Ready to scan</div></div>
-    <div className="grid gap-6 lg:grid-cols-[1.35fr_.65fr]">
-      <section className="relative overflow-hidden rounded-3xl bg-sidebar p-5 text-sidebar-foreground shadow-xl sm:p-8"><div className="absolute inset-0 opacity-20 venue-grid" /><div className="relative flex min-h-[380px] flex-col items-center justify-center overflow-hidden rounded-2xl border border-sidebar-border/80 bg-sidebar/30 p-6"><video ref={videoRef} muted playsInline autoPlay className="absolute inset-0 h-full w-full object-cover opacity-70" data-testid="camera-video" /><div className="absolute inset-0 bg-sidebar/35" /><div className="relative mb-8 h-52 w-52 sm:h-64 sm:w-64"><div className={`absolute inset-0 rounded-3xl border-2 ${status === 'valid' ? 'border-accent' : status === 'invalid' ? 'border-destructive' : 'border-primary/80'} transition-colors`} /><span className="absolute -left-1 -top-1 h-8 w-8 border-l-2 border-t-2 border-primary" /><span className="absolute -right-1 -top-1 h-8 w-8 border-r-2 border-t-2 border-primary" /><span className="absolute -bottom-1 -left-1 h-8 w-8 border-b-2 border-l-2 border-primary" /><span className="absolute -bottom-1 -right-1 h-8 w-8 border-b-2 border-r-2 border-primary" /><div className="absolute left-3 right-3 top-1/2 h-px bg-primary animate-scan-pulse" /><QrCode className="absolute inset-0 m-auto h-24 w-24 text-sidebar-foreground/20" /></div><p className="relative font-mono text-[10px] uppercase tracking-[.18em] text-sidebar-foreground/70">{checkIn.isPending ? 'Checking code…' : cameraState === 'ready' ? 'Camera active' : cameraState === 'denied' ? 'Camera access needed' : cameraState === 'unsupported' ? 'Camera unavailable' : 'Starting camera…'}</p><p className="relative mt-2 text-center text-sm text-sidebar-foreground/80">{cameraState === 'denied' ? 'Allow camera access in your browser, then reload this page.' : cameraState === 'unsupported' ? 'Use the manual QR ID field below on this device.' : 'Hold the code inside the frame'}</p></div><form className="relative mt-5 flex gap-2" onSubmit={submit}><input value={qrId} onChange={(e) => setQrId(e.target.value)} placeholder="or type QR ID…" className="h-12 min-w-0 flex-1 rounded-xl border border-sidebar-border bg-sidebar-accent px-4 font-mono text-sm text-sidebar-foreground outline-none placeholder:text-sidebar-foreground/35 focus:border-primary" data-testid="input-qr-id" /><Button type="submit" disabled={checkIn.isPending || !qrId.trim()} className="bg-primary text-primary-foreground" data-testid="button-check-in">{checkIn.isPending ? 'Checking' : 'Check in'}</Button></form></section>
-      <section className={`flex min-h-[380px] flex-col justify-between rounded-3xl border p-6 transition-colors sm:p-8 ${status === 'valid' ? 'border-accent/40 bg-accent/10' : status === 'duplicate' ? 'border-secondary/60 bg-secondary/20' : status === 'invalid' ? 'border-destructive/40 bg-destructive/10' : 'border-border bg-card'}`} data-testid="panel-scan-result">{result ? <div className="animate-check-pop"><div className={`mb-7 flex h-14 w-14 items-center justify-center rounded-2xl ${status === 'valid' ? 'bg-accent text-accent-foreground' : status === 'duplicate' ? 'bg-secondary text-secondary-foreground' : 'bg-destructive text-destructive-foreground'}`}>{status === 'valid' ? <CheckCircle2 /> : status === 'duplicate' ? <AlertCircle /> : <XCircle />}</div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-foreground/50">{status === 'valid' ? 'Entry approved' : status === 'duplicate' ? 'Already inside' : 'No match found'}</p><h2 className="mt-2 font-display text-3xl font-bold tracking-tight">{result.attendee?.name || 'Unknown code'}</h2><p className="mt-3 text-sm leading-6 text-muted-foreground">{result.message}</p>{result.attendee && <div className="mt-6 border-t border-current/10 pt-4"><div className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">{result.attendee.ticketType}</div><div className="mt-2 text-xs text-muted-foreground">{result.attendee.email || 'No email on file'}</div></div>}</div> : <div><div className="mb-7 flex h-14 w-14 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><Ticket /></div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted-foreground">Awaiting next scan</p><h2 className="mt-2 font-display text-3xl font-bold tracking-tight">One guest<br />at a time.</h2><p className="mt-4 max-w-xs text-sm leading-6 text-muted-foreground">A clear result lands here. Green means welcome in. Amber means pause. Red means find a lead.</p></div>}<div className="mt-8 flex items-center gap-2 border-t border-current/10 pt-4 font-mono text-[10px] uppercase tracking-[.12em] text-muted-foreground"><span className="h-2 w-2 rounded-full bg-accent" /> Changes sync live</div></section>
-    </div>
-    <div className="mt-6 flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-xs text-muted-foreground"><ClipboardList className="h-4 w-4 text-primary" /><span>Need a wider view?</span><Link href="/dashboard" className="font-bold text-foreground underline decoration-primary underline-offset-4" data-testid="link-open-live-board">Open live board <ChevronRight className="inline h-3 w-3" /></Link></div>
-  </main>;
+  const isValid = status === 'valid';
+  const isDuplicate = status === 'duplicate';
+
+  return (
+    <main className="mx-auto max-w-6xl p-5 pb-12 sm:p-8 lg:p-12">
+      {/* ── Result fullscreen overlay ── */}
+      {result && (
+        <div className={`fixed inset-0 z-50 flex flex-col items-center justify-center p-8 ${isValid ? 'bg-fuchsia-950' : isDuplicate ? 'bg-amber-950' : 'bg-red-950'}`} data-testid="overlay-scan-result">
+          {/* big status icon */}
+          <div className={`flex h-24 w-24 items-center justify-center rounded-full ${isValid ? 'bg-fuchsia-500/20' : isDuplicate ? 'bg-amber-500/20' : 'bg-red-500/20'}`}>
+            {isValid ? <CheckCircle2 className="h-14 w-14 text-fuchsia-400" /> : isDuplicate ? <AlertCircle className="h-14 w-14 text-amber-400" /> : <XCircle className="h-14 w-14 text-red-400" />}
+          </div>
+
+          {/* DONE / label */}
+          <p className={`mt-6 font-mono text-xs uppercase tracking-[.3em] ${isValid ? 'text-fuchsia-500' : isDuplicate ? 'text-amber-500' : 'text-red-500'}`}>
+            {isValid ? 'Entry approved' : isDuplicate ? 'Already checked in' : 'Not found'}
+          </p>
+          <h2 className={`mt-2 font-display text-7xl font-black tracking-tight ${isValid ? 'text-fuchsia-300' : isDuplicate ? 'text-amber-300' : 'text-red-300'}`}>
+            {isValid ? 'DONE ✓' : isDuplicate ? 'DUPE' : 'ERROR'}
+          </h2>
+
+          {/* Attendee info */}
+          {result.attendee && (
+            <div className="mt-8 text-center">
+              <div className={`text-3xl font-bold ${isValid ? 'text-fuchsia-200' : isDuplicate ? 'text-amber-200' : 'text-red-200'}`}>{result.attendee.name}</div>
+              <div className={`mt-2 font-mono text-sm ${isValid ? 'text-fuchsia-400' : isDuplicate ? 'text-amber-400' : 'text-red-400'}`}>{result.attendee.ticketType}</div>
+              {result.attendee.email && <div className={`mt-1 text-sm ${isValid ? 'text-fuchsia-500' : isDuplicate ? 'text-amber-500' : 'text-red-500'}`}>{result.attendee.email}</div>}
+            </div>
+          )}
+          {!result.attendee && <p className={`mt-6 text-sm ${isValid ? 'text-fuchsia-400' : isDuplicate ? 'text-amber-400' : 'text-red-400'}`}>{result.message}</p>}
+
+          {/* Scan Next button */}
+          <button
+            onClick={resetScan}
+            className={`mt-12 rounded-2xl px-12 py-5 text-xl font-black tracking-tight transition active:scale-95 ${isValid ? 'bg-fuchsia-500 text-white hover:bg-fuchsia-400' : isDuplicate ? 'bg-amber-500 text-white hover:bg-amber-400' : 'bg-red-500 text-white hover:bg-red-400'}`}
+            data-testid="button-scan-next"
+          >
+            Scan Next →
+          </button>
+        </div>
+      )}
+
+      {/* ── Scanner page ── */}
+      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+        <div><p className="mb-2 font-mono text-[10px] uppercase tracking-[.2em] text-primary">Entrance / Main gate</p><h1 className="font-display text-4xl font-bold tracking-[-.045em] sm:text-5xl">Scanner<span className="text-primary">.</span></h1><p className="mt-2 text-sm text-muted-foreground">Point at a guest's code or enter their ID below.</p></div>
+        <div className="flex items-center gap-2 rounded-full border border-accent/25 bg-accent/10 px-3 py-2 font-mono text-[10px] uppercase tracking-[.12em] text-accent"><span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> Ready to scan</div>
+      </div>
+
+      <section className="relative overflow-hidden rounded-3xl bg-sidebar p-5 text-sidebar-foreground shadow-xl sm:p-8">
+        <div className="absolute inset-0 opacity-20 venue-grid" />
+        <div className="relative flex min-h-[380px] flex-col items-center justify-center overflow-hidden rounded-2xl border border-sidebar-border/80 bg-sidebar/30 p-6">
+          <video ref={videoRef} muted playsInline autoPlay className="absolute inset-0 h-full w-full object-cover opacity-70" data-testid="camera-video" />
+          <div className="absolute inset-0 bg-sidebar/35" />
+          <div className="relative mb-8 h-52 w-52 sm:h-64 sm:w-64">
+            <div className="absolute inset-0 rounded-3xl border-2 border-primary/80 transition-colors" />
+            <span className="absolute -left-1 -top-1 h-8 w-8 border-l-2 border-t-2 border-primary" />
+            <span className="absolute -right-1 -top-1 h-8 w-8 border-r-2 border-t-2 border-primary" />
+            <span className="absolute -bottom-1 -left-1 h-8 w-8 border-b-2 border-l-2 border-primary" />
+            <span className="absolute -bottom-1 -right-1 h-8 w-8 border-b-2 border-r-2 border-primary" />
+            <div className="absolute left-3 right-3 top-1/2 h-px bg-primary animate-scan-pulse" />
+            <QrCode className="absolute inset-0 m-auto h-24 w-24 text-sidebar-foreground/20" />
+          </div>
+          <p className="relative font-mono text-[10px] uppercase tracking-[.18em] text-sidebar-foreground/70">{checkIn.isPending ? 'Checking code…' : cameraState === 'ready' ? 'Camera active' : cameraState === 'denied' ? 'Camera access needed' : cameraState === 'unsupported' ? 'Camera unavailable' : 'Starting camera…'}</p>
+          <p className="relative mt-2 text-center text-sm text-sidebar-foreground/80">{cameraState === 'denied' ? 'Allow camera access in your browser, then reload this page.' : cameraState === 'unsupported' ? 'Use the manual QR ID field below.' : 'Hold the code inside the frame'}</p>
+        </div>
+        <form className="relative mt-5 flex gap-2" onSubmit={submit}>
+          <input value={qrId} onChange={(e) => setQrId(e.target.value)} placeholder="or type QR ID…" className="h-12 min-w-0 flex-1 rounded-xl border border-sidebar-border bg-sidebar-accent px-4 font-mono text-sm text-sidebar-foreground outline-none placeholder:text-sidebar-foreground/35 focus:border-primary" data-testid="input-qr-id" />
+          <Button type="submit" disabled={checkIn.isPending || !qrId.trim()} className="bg-primary text-primary-foreground" data-testid="button-check-in">{checkIn.isPending ? 'Checking' : 'Check in'}</Button>
+        </form>
+      </section>
+
+      <div className="mt-6 flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-xs text-muted-foreground"><ClipboardList className="h-4 w-4 text-primary" /><span>Need a wider view?</span><Link href="/dashboard" className="font-bold text-foreground underline decoration-primary underline-offset-4" data-testid="link-open-live-board">Open live board <ChevronRight className="inline h-3 w-3" /></Link></div>
+    </main>
+  );
 }
 
 function Stat({ label, value, tone = 'default', detail }: { label: string; value: number; tone?: string; detail: string }) {
@@ -189,6 +321,34 @@ async function downloadQr(id: string, name: string) {
   link.click();
 }
 
+function QrImage({ qrId }: { qrId: string }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => { QRCode.toDataURL(qrId, { width: 240, margin: 1, errorCorrectionLevel: 'M' }).then(setSrc); }, [qrId]);
+  return src ? <img src={src} alt={qrId} className="h-28 w-28 rounded-xl" /> : <div className="h-28 w-28 animate-pulse rounded-xl bg-muted" />;
+}
+
+function QrGenerator() {
+  const [q, setQ] = useState('');
+  const params = useMemo(() => ({ q: q || undefined }), [q]);
+  const attendeesQuery = useListAttendees(params, { query: { queryKey: getListAttendeesQueryKey(params) } });
+  const attendees = attendeesQuery.data || [];
+  const downloadAll = async () => { for (const a of attendees) { await downloadQr(a.qrId, a.name); await new Promise((r) => setTimeout(r, 350)); } };
+  return <main className="mx-auto max-w-6xl p-5 pb-12 sm:p-8 lg:p-12">
+    <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+      <div><p className="mb-2 font-mono text-[10px] uppercase tracking-[.2em] text-primary">QR Codes / all guests</p><h1 className="font-display text-4xl font-bold tracking-[-.045em] sm:text-5xl">QR Generator<span className="text-primary">.</span></h1><p className="mt-2 text-sm text-muted-foreground">Preview and download QR codes for every attendee.</p></div>
+      {attendees.length > 0 && <Button onClick={downloadAll} className="bg-primary text-primary-foreground"><Download className="h-4 w-4" /> Download all ({attendees.length})</Button>}
+    </div>
+    <div className="relative mb-6"><Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, email, or QR ID" className="h-11 w-full rounded-lg border border-input bg-card pl-9 pr-3 text-sm outline-none focus:border-primary" /></div>
+    {attendeesQuery.isLoading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">{Array.from({ length: 8 }).map((_, i) => <div key={i} className="h-52 animate-pulse rounded-2xl bg-muted" />)}</div>
+    : attendees.length ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">{attendees.map((a) => <div key={a.id} className="group flex flex-col items-center gap-2 rounded-2xl border border-border bg-card p-4 text-center transition hover:border-primary hover:shadow-md">
+        <QrImage qrId={a.qrId} />
+        <div className="w-full min-w-0 flex-1"><div className="truncate text-sm font-bold">{a.name}</div><div className="font-mono text-[10px] text-muted-foreground">{a.qrId}</div><div className="mt-1 truncate text-[10px] text-muted-foreground">{a.ticketType}</div></div>
+        <button onClick={() => downloadQr(a.qrId, a.name)} className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-muted py-2 text-xs font-bold transition hover:bg-primary hover:text-primary-foreground"><Download className="h-3 w-3" /> Download</button>
+      </div>)}</div>
+    : <div className="py-20 text-center"><QrCode className="mx-auto mb-4 h-12 w-12 text-muted-foreground/30" /><h2 className="font-display text-2xl font-bold">No attendees found.</h2><p className="mt-2 text-sm text-muted-foreground">Import a CSV from the Attendees page first.</p><Link href="/attendees" className="mt-5 inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Go to Attendees <ArrowRight className="h-4 w-4" /></Link></div>}
+  </main>;
+}
+
 function Attendees() {
   const [q, setQ] = useState(''); const [status, setStatus] = useState<'all' | 'checked-in' | 'pending'>('all'); const [importOpen, setImportOpen] = useState(false); const [importResult, setImportResult] = useState<any>(null); const fileRef = useRef<HTMLInputElement>(null);
   const params = useMemo(() => ({ q: q || undefined, status: status === 'all' ? undefined : status }), [q, status]);
@@ -204,7 +364,7 @@ function Attendees() {
 }
 
 function AuthenticatedApp({ user }: { user: { username: string; displayName: string } }) {
-  return <Shell user={user}><Switch><Route path="/" component={Scanner} /><Route path="/dashboard" component={Dashboard} /><Route path="/attendees" component={Attendees} /><Route component={NotFound} /></Switch></Shell>;
+  return <Shell user={user}><Switch><Route path="/" component={Scanner} /><Route path="/dashboard" component={Dashboard} /><Route path="/attendees" component={Attendees} /><Route path="/qr" component={QrGenerator} /><Route component={NotFound} /></Switch></Shell>;
 }
 
 function Router() {
