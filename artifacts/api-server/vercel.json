@@ -1,6 +1,18 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "src/app.ts",
+      "use": "@vercel/node",
+      "config": {
+        "bundle": true
+      }
+    }
+  ],
   "rewrites": [
-    { "source": "/(.*)", "destination": "/src/app.ts" }
+    {
+      "source": "/(.*)",
+      "destination": "/src/app.ts"
+    }
   ]
 }
