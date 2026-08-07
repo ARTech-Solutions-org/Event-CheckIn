@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { count, desc, isNotNull, sql } from "drizzle-orm";
 import { db, attendeesTable } from "@workspace/db";
 import { GetDashboardSummaryResponse } from "@workspace/api-zod";
-import { requireOrganizer } from "./event-helpers";
+import { requireOrganizer } from "./event-helpers.js";
 
 const router: IRouter = Router();
 router.use("/dashboard", requireOrganizer);

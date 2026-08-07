@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { getSessionUser } from "../lib/event-auth";
+import { getSessionUser } from "../lib/event-auth.js";
 
 export async function requireOrganizer(req: Request, res: Response, next: NextFunction): Promise<void> {
   const user = await getSessionUser(req);

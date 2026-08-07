@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import { db, attendeesTable } from "@workspace/db";
 import { CheckInBody, CheckInResponse } from "@workspace/api-zod";
-import { requireOrganizer } from "./event-helpers";
+import { requireOrganizer } from "./event-helpers.js";
 
 const router: IRouter = Router();
 router.use("/check-ins", requireOrganizer);

@@ -7,7 +7,7 @@ import {
   ListAttendeesQueryParams,
   ListAttendeesResponse,
 } from "@workspace/api-zod";
-import { requireOrganizer } from "./event-helpers";
+import { requireOrganizer } from "./event-helpers.js";
 import { randomUUID } from "node:crypto";
 
 const router: IRouter = Router();

@@ -7,8 +7,8 @@ import {
   LoginBody,
   LoginResponse,
 } from "@workspace/api-zod";
-import { clearSession, getSessionUser, setSession, verifyPassword } from "../lib/event-auth";
-import { ensureEventSeed } from "../lib/event-seed";
+import { clearSession, getSessionUser, setSession, verifyPassword } from "../lib/event-auth.js";
+import { ensureEventSeed } from "../lib/event-seed.js";
 
 const router: IRouter = Router();
 
