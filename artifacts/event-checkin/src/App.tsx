@@ -84,7 +84,15 @@ function Scanner() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const scanLockedRef = useRef(false);
   const checkInRef = useRef(checkIn);
+  const cameraStartedRef = useRef(false);
+  const cameraActiveRef = useRef(false);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraRafRef = useRef<number | null>(null);
   checkInRef.current = checkIn;
+  const isIosDevice = typeof navigator !== 'undefined' && (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
 
   const submitQr = (value: string) => {
     const trimmed = value.trim();
@@ -106,56 +114,62 @@ function Scanner() {
 
   const resetScan = () => { setResult(null); scanLockedRef.current = false; };
 
-  useEffect(() => {
+  const stopCamera = () => {
+    cameraActiveRef.current = false;
+    if (cameraRafRef.current !== null) cancelAnimationFrame(cameraRafRef.current);
+    cameraRafRef.current = null;
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    cameraStreamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    cameraStartedRef.current = false;
+  };
+
+  const startCamera = async () => {
+    if (cameraStartedRef.current) return;
     if (!navigator.mediaDevices?.getUserMedia) { setCameraState('unsupported'); return; }
     const video = videoRef.current;
     if (!video) { setCameraState('unsupported'); return; }
 
-    let active = true;
-    let rafId: number;
-    let stream: MediaStream | null = null;
-
-    const stop = () => {
-      active = false;
-      if (rafId) cancelAnimationFrame(rafId);
-      stream?.getTracks().forEach((t) => t.stop());
-      video.srcObject = null;
-    };
-
-    (async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
+    cameraStartedRef.current = true;
+    cameraActiveRef.current = true;
+    try {
+        // iOS Safari is more reliable with a direct environment-facing
+        // constraint after a user tap. Android keeps the existing ideal
+        // constraints and automatic startup below.
+        const videoConstraints = isIosDevice
+          ? { facingMode: 'environment' as const }
+          : {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1920 },
             height: { ideal: 1080 },
             frameRate: { ideal: 30 },
-          },
-        });
-        if (!active) { stream.getTracks().forEach((t) => t.stop()); return; }
+          };
+        const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+        cameraStreamRef.current = stream;
+        if (!cameraActiveRef.current) { stream.getTracks().forEach((track) => track.stop()); return; }
         video.srcObject = stream;
         await video.play();
-        if (!active) return;
+        if (!cameraActiveRef.current) return;
         setCameraState('ready');
 
-        // ── Path 1: native BarcodeDetector (Android Chrome — fastest, any angle) ──
+        // ── Path 1: native BarcodeDetector (Android Chrome — unchanged) ──
         if ('BarcodeDetector' in window) {
           const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
           const loop = async () => {
-            if (!active) return;
+            if (!cameraActiveRef.current) return;
             if (video.readyState >= 2) {
               try {
                 const codes: any[] = await detector.detect(video);
                 if (codes.length > 0) submitQr(codes[0].rawValue);
               } catch { /* no code in frame */ }
             }
-            if (active) rafId = requestAnimationFrame(loop);
+            if (cameraActiveRef.current) cameraRafRef.current = requestAnimationFrame(loop);
           };
-          rafId = requestAnimationFrame(loop);
+          cameraRafRef.current = requestAnimationFrame(loop);
           return;
         }
 
-        // ── Path 2: ZXing with TRY_HARDER + rAF loop ──
+        // ── Path 2: ZXing with TRY_HARDER + rAF loop (unchanged) ──
         const hints = new Map<DecodeHintType, any>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE]);
         hints.set(DecodeHintType.TRY_HARDER, true); // better angle & distance tolerance
@@ -166,7 +180,7 @@ function Scanner() {
         const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
         const loop = () => {
-          if (!active) return;
+          if (!cameraActiveRef.current) return;
           if (video.readyState >= 2 && video.videoWidth > 0) {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
@@ -178,16 +192,18 @@ function Scanner() {
               submitQr(result.getText());
             } catch { /* no code in frame */ }
           }
-          rafId = requestAnimationFrame(loop);
+          cameraRafRef.current = requestAnimationFrame(loop);
         };
-        rafId = requestAnimationFrame(loop);
+        cameraRafRef.current = requestAnimationFrame(loop);
+    } catch {
+      cameraStartedRef.current = false;
+      if (cameraActiveRef.current) setCameraState('denied');
+    }
+  };
 
-      } catch {
-        if (active) setCameraState('denied');
-      }
-    })();
-
-    return stop;
+  useEffect(() => {
+    if (!isIosDevice) void startCamera();
+    return stopCamera;
   }, []);
 
   const submit = (event?: FormEvent) => { event?.preventDefault(); submitQr(qrId); };
@@ -254,8 +270,13 @@ function Scanner() {
             <div className="absolute left-3 right-3 top-1/2 h-px bg-primary animate-scan-pulse" />
             <QrCode className="absolute inset-0 m-auto h-24 w-24 text-sidebar-foreground/20" />
           </div>
-          <p className="relative font-mono text-[10px] uppercase tracking-[.18em] text-sidebar-foreground/70">{checkIn.isPending ? 'Checking code…' : cameraState === 'ready' ? 'Camera active' : cameraState === 'denied' ? 'Camera access needed' : cameraState === 'unsupported' ? 'Camera unavailable' : 'Starting camera…'}</p>
-          <p className="relative mt-2 text-center text-sm text-sidebar-foreground/80">{cameraState === 'denied' ? 'Allow camera access in your browser, then reload this page.' : cameraState === 'unsupported' ? 'Use the manual QR ID field below.' : 'Hold the code inside the frame'}</p>
+          <p className="relative font-mono text-[10px] uppercase tracking-[.18em] text-sidebar-foreground/70">{checkIn.isPending ? 'Checking code…' : cameraState === 'ready' ? 'Camera active' : cameraState === 'denied' ? 'Camera access needed' : cameraState === 'unsupported' ? 'Camera unavailable' : isIosDevice ? 'Camera not enabled' : 'Starting camera…'}</p>
+          <p className="relative mt-2 text-center text-sm text-sidebar-foreground/80">{cameraState === 'denied' ? 'Allow camera access in iPhone Settings, then tap Enable camera again.' : cameraState === 'unsupported' ? 'Use the manual QR ID field below.' : isIosDevice && cameraState !== 'ready' ? 'Tap below to allow camera access and start scanning.' : 'Hold the code inside the frame'}</p>
+          {isIosDevice && cameraState !== 'ready' && cameraState !== 'unsupported' && (
+            <button type="button" onClick={() => void startCamera()} className="relative mt-5 rounded-xl bg-primary px-5 py-3 text-sm font-bold text-primary-foreground shadow-md shadow-primary/20" data-testid="button-enable-camera">
+              {cameraState === 'denied' ? 'Try camera again' : 'Enable camera'}
+            </button>
+          )}
         </div>
         <form className="relative mt-5 flex gap-2" onSubmit={submit}>
           <input value={qrId} onChange={(e) => setQrId(e.target.value)} placeholder="or type QR ID…" className="h-12 min-w-0 flex-1 rounded-xl border border-sidebar-border bg-sidebar-accent px-4 font-mono text-sm text-sidebar-foreground outline-none placeholder:text-sidebar-foreground/35 focus:border-primary" data-testid="input-qr-id" />

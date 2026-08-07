@@ -12,6 +12,12 @@ A mobile-first web app for event check-in using QR code scanning. Organizers log
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required secret: `NEON_DATABASE_URL` — Neon PostgreSQL connection string (set as Replit Secret)
 
+## Vercel deployment
+
+- The root `vercel.json` builds the frontend with `pnpm run vercel-build` and routes `/api/*` to `api/index.ts`.
+- Set `NEON_DATABASE_URL` in the Vercel project environment variables for the API.
+- Set `VITE_API_URL` to the deployed API base URL when the API and frontend are deployed as separate Vercel projects. If using the root configuration's `/api` rewrite, use `/api` for same-deployment requests.
+
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
