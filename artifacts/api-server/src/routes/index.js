@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+var express_1 = require("express");
+var health_js_1 = require("./health.js");
+var auth_js_1 = require("./auth.js");
+var attendees_js_1 = require("./attendees.js");
+var check_ins_js_1 = require("./check-ins.js");
+var dashboard_js_1 = require("./dashboard.js");
+var router = (0, express_1.Router)();
+router.use(health_js_1.default);
+router.use(auth_js_1.default);
+router.use(attendees_js_1.default);
+router.use(check_ins_js_1.default);
+router.use(dashboard_js_1.default);
+exports.default = router;
