@@ -1,3 +1,11 @@
-import app from "../artifacts/api-server/src/app.js";
+let appPromise: Promise<any> | null = null;
 
-export default app;
+export default async function handler(req: any, res: any) {
+  if (!appPromise) {
+    appPromise = import("../artifacts/api-server/src/app.js").then(
+      (mod) => mod.default || mod,
+    );
+  }
+  const app = await appPromise;
+  return app(req, res);
+}
