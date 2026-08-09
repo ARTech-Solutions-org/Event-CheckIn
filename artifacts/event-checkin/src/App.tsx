@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/reac
 import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { getGetCurrentUserQueryKey, getGetDashboardSummaryQueryKey, getListAttendeesQueryKey, useCheckIn, useGetCurrentUser, useGetDashboardSummary, useImportAttendees, useListAttendees, useLogin, useLogout } from '@workspace/api-client-react';
 import { AlertCircle, ArrowRight, BarChart3, Check, CheckCircle2, ChevronRight, ClipboardList, Download, FileUp, LogOut, Menu, QrCode, Search, Ticket, Users, X, XCircle } from 'lucide-react';
-import { BinaryBitmap, BarcodeFormat, DecodeHintType, HybridBinarizer, MultiFormatReader, RGBLuminanceSource } from '@zxing/library';
+import { BrowserMultiFormatReader } from '@zxing/browser';
+import { BarcodeFormat, DecodeHintType } from '@zxing/library';
 import QRCode from 'qrcode';
 import NotFound from '@/pages/not-found';
 
@@ -88,10 +89,11 @@ function Scanner() {
   const cameraActiveRef = useRef(false);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraRafRef = useRef<number | null>(null);
+  const scannerControlsRef = useRef<any>(null);
   checkInRef.current = checkIn;
   const isIosDevice = typeof navigator !== 'undefined' && (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+    (navigator.userAgent.includes('Mac') && 'ontouchend' in document)
   );
 
   const submitQr = (value: string) => {
@@ -118,6 +120,12 @@ function Scanner() {
     cameraActiveRef.current = false;
     if (cameraRafRef.current !== null) cancelAnimationFrame(cameraRafRef.current);
     cameraRafRef.current = null;
+    
+    if (scannerControlsRef.current) {
+        scannerControlsRef.current.stop();
+        scannerControlsRef.current = null;
+    }
+    
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
@@ -169,32 +177,22 @@ function Scanner() {
           return;
         }
 
-        // ── Path 2: ZXing with TRY_HARDER + rAF loop (unchanged) ──
+        // ── Path 2: ZXing with TRY_HARDER via @zxing/browser ──
         const hints = new Map<DecodeHintType, any>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE]);
-        hints.set(DecodeHintType.TRY_HARDER, true); // better angle & distance tolerance
-        const zxing = new MultiFormatReader();
-        zxing.setHints(hints);
-
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-
-        const loop = () => {
+        hints.set(DecodeHintType.TRY_HARDER, true);
+        
+        const zxing = new BrowserMultiFormatReader(hints);
+        zxing.decodeFromVideoElement(video, (result, error) => {
           if (!cameraActiveRef.current) return;
-          if (video.readyState >= 2 && video.videoWidth > 0) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.drawImage(video, 0, 0);
-            try {
-              const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              const lum = new RGBLuminanceSource(data as unknown as Uint8ClampedArray, canvas.width, canvas.height);
-              const result = zxing.decode(new BinaryBitmap(new HybridBinarizer(lum)));
-              submitQr(result.getText());
-            } catch { /* no code in frame */ }
+          if (result) {
+            submitQr(result.getText());
           }
-          cameraRafRef.current = requestAnimationFrame(loop);
-        };
-        cameraRafRef.current = requestAnimationFrame(loop);
+        }).then((controls) => {
+          scannerControlsRef.current = controls;
+        }).catch(() => {
+          /* ignore initialization errors */
+        });
     } catch {
       cameraStartedRef.current = false;
       if (cameraActiveRef.current) setCameraState('denied');
