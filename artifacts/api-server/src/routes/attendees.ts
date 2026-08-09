@@ -2,6 +2,8 @@ import { Router, type IRouter } from "express";
 import { and, asc, desc, eq, ilike, isNull, isNotNull, or } from "drizzle-orm";
 import { db, attendeesTable } from "@workspace/db";
 import {
+  CreateAttendeeBody,
+  CreateAttendeeResponse,
   ImportAttendeesBody,
   ImportAttendeesResponse,
   ListAttendeesQueryParams,
@@ -32,6 +34,24 @@ router.get("/attendees", async (req, res): Promise<void> => {
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(asc(attendeesTable.name));
   res.json(ListAttendeesResponse.parse(attendees));
+});
+
+router.post("/attendees/create", async (req, res): Promise<void> => {
+  const parsed = CreateAttendeeBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  
+  const attendeeData = {
+    qrId: parsed.data.qrId?.trim() || `EVT-${randomUUID().slice(0, 8).toUpperCase()}`,
+    name: parsed.data.name.trim(),
+    email: parsed.data.email?.trim() || null,
+    ticketType: parsed.data.ticketType.trim(),
+  };
+
+  const [inserted] = await db.insert(attendeesTable).values(attendeeData).returning();
+  res.status(201).json(CreateAttendeeResponse.parse(inserted));
 });
 
 router.post("/attendees/import", async (req, res): Promise<void> => {

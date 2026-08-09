@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
-import { getGetCurrentUserQueryKey, getGetDashboardSummaryQueryKey, getListAttendeesQueryKey, useCheckIn, useGetCurrentUser, useGetDashboardSummary, useImportAttendees, useListAttendees, useLogin, useLogout } from '@workspace/api-client-react';
+import { getGetCurrentUserQueryKey, getGetDashboardSummaryQueryKey, getListAttendeesQueryKey, useCheckIn, useGetCurrentUser, useGetDashboardSummary, useImportAttendees, useCreateAttendee, useListAttendees, useLogin, useLogout } from '@workspace/api-client-react';
 import { AlertCircle, ArrowRight, BarChart3, Check, CheckCircle2, ChevronRight, ClipboardList, Download, FileUp, LogOut, Menu, QrCode, Search, Ticket, Users, X, XCircle } from 'lucide-react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
 import { BarcodeFormat, DecodeHintType } from '@zxing/library';
@@ -128,7 +128,11 @@ function Scanner() {
     
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+      videoRef.current.load();
+    }
     cameraStartedRef.current = false;
   };
 
@@ -312,8 +316,31 @@ function Dashboard() {
 }
 
 function makeCsv(text: string) {
-  const [header, ...lines] = text.trim().split(/\r?\n/); const keys = header.split(',').map((x) => x.trim().toLowerCase());
-  return lines.filter(Boolean).map((line) => { const values = line.split(',').map((x) => x.trim().replace(/^"|"$/g, '')); const row = Object.fromEntries(keys.map((key, index) => [key, values[index] || ''])); return { name: row.name, email: row.email || undefined, ticketType: row.tickettype || row['ticket type'] || 'General' }; }).filter((row) => row.name);
+  try {
+    const lines = text.trim().split(/\r?\n/).filter(line => line.trim());
+    if (lines.length < 2) return [];
+    
+    let delimiter = ',';
+    if (!lines[0].includes(',') && lines[0].includes(';')) {
+      delimiter = ';';
+    }
+    
+    const header = lines.shift()!;
+    const keys = header.split(delimiter).map((x) => x.trim().replace(/^"|"$/g, '').toLowerCase());
+    
+    return lines.map((line) => {
+      const values = line.split(delimiter).map((x) => x.trim().replace(/^"|"$/g, ''));
+      const row = Object.fromEntries(keys.map((key, index) => [key, values[index] || '']));
+      return { 
+        name: row.name, 
+        email: row.email || undefined, 
+        ticketType: row.tickettype || row['ticket type'] || row.ticket_type || 'General',
+        qrId: row.qrid || row['qr id'] || row.qr_id || undefined
+      }; 
+    }).filter((row) => row.name);
+  } catch (err) {
+    return [];
+  }
 }
 async function downloadQr(id: string, name: string) {
   const dataUrl = await QRCode.toDataURL(id, { width: 720, margin: 2, errorCorrectionLevel: 'M' });
@@ -369,13 +396,81 @@ function QrGenerator() {
 }
 
 function Attendees() {
-  const [q, setQ] = useState(''); const [status, setStatus] = useState<'all' | 'checked-in' | 'pending'>('all'); const [importOpen, setImportOpen] = useState(false); const [importResult, setImportResult] = useState<any>(null); const fileRef = useRef<HTMLInputElement>(null);
+  const [q, setQ] = useState(''); const [status, setStatus] = useState<'all' | 'checked-in' | 'pending'>('all'); 
+  const [importOpen, setImportOpen] = useState(false); const [importResult, setImportResult] = useState<any>(null); 
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createData, setCreateData] = useState({ name: '', email: '', ticketType: 'General' });
+  const fileRef = useRef<HTMLInputElement>(null);
+  
   const params = useMemo(() => ({ q: q || undefined, status: status === 'all' ? undefined : status }), [q, status]);
-  const attendeesQuery = useListAttendees(params, { query: { queryKey: getListAttendeesQueryKey(params) } }); const importAttendees = useImportAttendees();
+  const attendeesQuery = useListAttendees(params, { query: { queryKey: getListAttendeesQueryKey(params) } }); 
+  const importAttendees = useImportAttendees();
+  const createAttendee = useCreateAttendee();
   const attendees = attendeesQuery.data || [];
-  const importFile = (file?: File) => { if (!file) return; const reader = new FileReader(); reader.onload = () => { const attendeesToImport = makeCsv(String(reader.result)); if (attendeesToImport.length) importAttendees.mutate({ data: { attendees: attendeesToImport } }, { onSuccess: (result) => { setImportResult(result); setImportOpen(false); queryClient.invalidateQueries({ queryKey: getListAttendeesQueryKey() }); } }); }; reader.readAsText(file); };
-  return <main className="mx-auto max-w-6xl p-5 pb-12 sm:p-8 lg:p-12"><div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="mb-2 font-mono text-[10px] uppercase tracking-[.2em] text-primary">Roster / all guests</p><h1 className="font-display text-4xl font-bold tracking-[-.045em] sm:text-5xl">Attendees<span className="text-primary">.</span></h1><p className="mt-2 text-sm text-muted-foreground">Import the list, print the codes, keep the door moving.</p></div><Button onClick={() => setImportOpen(true)} className="bg-foreground text-background" data-testid="button-open-import"><FileUp className="h-4 w-4" /> Import CSV</Button></div>
-    {importResult && <div className="mb-5 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/10 p-4 text-sm" data-testid="status-import-success"><CheckCircle2 className="h-5 w-5 text-accent" /><div><b>{importResult.imported} attendees imported.</b><span className="ml-1 text-muted-foreground">{importResult.skipped ? `${importResult.skipped} skipped.` : 'Your roster is ready.'}</span></div><button className="ml-auto text-muted-foreground" onClick={() => setImportResult(null)} data-testid="button-dismiss-import"><X className="h-4 w-4" /></button></div>}
+  
+  const handleCreate = (e: React.FormEvent) => {
+    e.preventDefault();
+    createAttendee.mutate({ data: createData }, {
+      onSuccess: () => {
+        setCreateOpen(false);
+        setCreateData({ name: '', email: '', ticketType: 'General' });
+        queryClient.invalidateQueries({ queryKey: getListAttendeesQueryKey() });
+      }
+    });
+  };
+
+  const importFile = (file?: File) => { 
+    if (!file) return; 
+    const reader = new FileReader(); 
+    reader.onload = () => { 
+      const attendeesToImport = makeCsv(String(reader.result)); 
+      if (attendeesToImport.length) {
+        importAttendees.mutate({ data: { attendees: attendeesToImport } }, { 
+          onSuccess: (result) => { 
+            setImportResult(result); 
+            setImportOpen(false); 
+            queryClient.invalidateQueries({ queryKey: getListAttendeesQueryKey() }); 
+          },
+          onError: () => alert("Failed to import attendees. Please check the file format.")
+        }); 
+      } else {
+        alert("No valid rows found in the CSV. Make sure it has 'name' and 'ticketType' columns.");
+      }
+    }; 
+    reader.readAsText(file); 
+  };
+  
+  return <main className="mx-auto max-w-6xl p-5 pb-12 sm:p-8 lg:p-12">
+    <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <p className="mb-2 font-mono text-[10px] uppercase tracking-[.2em] text-primary">Roster / all guests</p>
+        <h1 className="font-display text-4xl font-bold tracking-[-.045em] sm:text-5xl">Attendees<span className="text-primary">.</span></h1>
+        <p className="mt-2 text-sm text-muted-foreground">Import the list, print the codes, keep the door moving.</p>
+      </div>
+      <div className="flex gap-2">
+        <Button onClick={() => setCreateOpen(true)} className="bg-primary text-primary-foreground" data-testid="button-create-attendee"><Users className="h-4 w-4" /> Create Attendee</Button>
+        <Button onClick={() => setImportOpen(true)} className="bg-foreground text-background" data-testid="button-open-import"><FileUp className="h-4 w-4" /> Import CSV</Button>
+      </div>
+    </div>
+    {createOpen && <div className="fixed inset-0 z-40 flex items-center justify-center bg-sidebar/50 p-5" role="dialog" data-testid="dialog-create">
+      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl sm:p-8">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="font-display text-2xl font-bold">New Attendee</h2>
+          </div>
+          <button onClick={() => setCreateOpen(false)} data-testid="button-close-create"><X className="h-5 w-5 text-muted-foreground" /></button>
+        </div>
+        <form onSubmit={handleCreate} className="mt-6 space-y-4">
+          <div><label className="mb-1 block text-sm font-bold">Name *</label><input required value={createData.name} onChange={e => setCreateData(d => ({ ...d, name: e.target.value }))} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:border-primary" /></div>
+          <div><label className="mb-1 block text-sm font-bold">Email</label><input type="email" value={createData.email} onChange={e => setCreateData(d => ({ ...d, email: e.target.value }))} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:border-primary" /></div>
+          <div><label className="mb-1 block text-sm font-bold">Ticket Type *</label><input required value={createData.ticketType} onChange={e => setCreateData(d => ({ ...d, ticketType: e.target.value }))} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:border-primary" /></div>
+          <div className="pt-2 flex justify-end gap-2">
+            <Button type="button" onClick={() => setCreateOpen(false)} className="border border-border bg-transparent text-foreground">Cancel</Button>
+            <Button type="submit" disabled={createAttendee.isPending} className="bg-primary text-primary-foreground">{createAttendee.isPending ? 'Saving...' : 'Save'}</Button>
+          </div>
+        </form>
+      </div>
+    </div>}    {importResult && <div className="mb-5 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/10 p-4 text-sm" data-testid="status-import-success"><CheckCircle2 className="h-5 w-5 text-accent" /><div><b>{importResult.imported} attendees imported.</b><span className="ml-1 text-muted-foreground">{importResult.skipped ? `${importResult.skipped} skipped.` : 'Your roster is ready.'}</span></div><button className="ml-auto text-muted-foreground" onClick={() => setImportResult(null)} data-testid="button-dismiss-import"><X className="h-4 w-4" /></button></div>}
     <div className="mb-5 flex flex-col gap-3 md:flex-row"><div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, email, QR ID" className="h-11 w-full rounded-lg border border-input bg-card pl-9 pr-3 text-sm outline-none focus:border-primary" data-testid="input-attendee-search" /></div><div className="flex rounded-lg border border-border bg-card p-1">{(['all', 'checked-in', 'pending'] as const).map((filter) => <button key={filter} onClick={() => setStatus(filter)} className={`rounded-md px-3 py-2 text-xs font-bold capitalize ${status === filter ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground'}`} data-testid={`button-filter-${filter}`}>{filter === 'checked-in' ? 'Checked in' : filter}</button>)}</div></div>
     <section className="overflow-hidden rounded-2xl border border-border bg-card">{attendeesQuery.isLoading ? <div className="space-y-3 p-6"><div className="h-10 animate-pulse rounded bg-muted" /><div className="h-10 animate-pulse rounded bg-muted" /><div className="h-10 animate-pulse rounded bg-muted" /></div> : attendees.length ? <div className="divide-y divide-border">{attendees.map((attendee) => <div className="flex flex-wrap items-center gap-3 px-4 py-4 sm:px-6" key={attendee.id} data-testid={`row-attendee-${attendee.id}`}><div className="flex h-10 w-10 items-center justify-center rounded-full bg-secondary text-sm font-bold">{attendee.name.slice(0, 1)}</div><div className="min-w-[150px] flex-1"><div className="font-bold">{attendee.name}</div><div className="text-xs text-muted-foreground">{attendee.email || 'No email'} · <span className="font-mono">{attendee.qrId}</span></div></div><span className="rounded-full bg-muted px-3 py-1 text-[10px] font-bold uppercase tracking-[.08em]">{attendee.ticketType}</span><span className={`flex items-center gap-1 text-xs font-bold ${attendee.checkedInAt ? 'text-accent' : 'text-muted-foreground'}`}>{attendee.checkedInAt ? <><Check className="h-3 w-3" /> Checked in</> : 'Pending'}</span><button onClick={() => downloadQr(attendee.qrId, attendee.name)} className="rounded-lg border border-border p-2 text-muted-foreground transition hover:border-primary hover:text-primary" title="Download QR code" data-testid={`button-download-qr-${attendee.id}`}><Download className="h-4 w-4" /></button></div>)}</div> : <div className="p-14 text-center" data-testid="empty-attendees"><Users className="mx-auto mb-4 h-10 w-10 text-muted-foreground/40" /><h2 className="font-display text-2xl font-bold">No guests here yet.</h2><p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">Import a CSV to build your roster. Use columns named name, email, and ticketType.</p><Button onClick={() => setImportOpen(true)} className="mt-5 bg-primary text-primary-foreground" data-testid="button-empty-import">Import your list</Button></div>}</section>
     {importOpen && <div className="fixed inset-0 z-40 flex items-center justify-center bg-sidebar/50 p-5" role="dialog" data-testid="dialog-import"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 shadow-2xl sm:p-8"><div className="flex items-start justify-between"><div><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">Roster import</p><h2 className="mt-2 font-display text-3xl font-bold">Bring the list in.</h2></div><button onClick={() => setImportOpen(false)} data-testid="button-close-import"><X className="h-5 w-5 text-muted-foreground" /></button></div><p className="mt-3 text-sm leading-6 text-muted-foreground">Upload a CSV with <span className="font-mono text-foreground">name,email,ticketType</span> columns. Existing QR IDs are preserved when included.</p><button onClick={() => fileRef.current?.click()} className="mt-7 flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed border-primary/30 bg-primary/5 p-9 text-center transition hover:border-primary" data-testid="button-choose-csv"><FileUp className="mb-3 h-8 w-8 text-primary" /><span className="font-bold">{importAttendees.isPending ? 'Importing roster…' : 'Choose CSV file'}</span><span className="mt-1 text-xs text-muted-foreground">.csv files only</span></button><input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => importFile(e.target.files?.[0])} data-testid="input-csv-file" /><div className="mt-6 flex justify-end"><Button onClick={() => setImportOpen(false)} className="border border-border bg-transparent" data-testid="button-cancel-import">Cancel</Button></div></div></div>}

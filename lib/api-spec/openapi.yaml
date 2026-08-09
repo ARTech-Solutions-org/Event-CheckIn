@@ -119,6 +119,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /attendees/create:
+    post:
+      operationId: createAttendee
+      tags: [attendees]
+      summary: Manually create a single attendee
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttendeeInput"
+      responses:
+        "201":
+          description: Created attendee
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attendee"
+        "400":
+          description: Invalid attendee data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /attendees/import:
     post:
       operationId: importAttendees

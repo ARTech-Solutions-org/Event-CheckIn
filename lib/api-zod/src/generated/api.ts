@@ -75,6 +75,31 @@ export const ListAttendeesResponse = zod.array(ListAttendeesResponseItem)
 
 
 /**
+ * @summary Manually create a single attendee
+ */
+
+
+
+
+export const CreateAttendeeBody = zod.object({
+  "name": zod.string().min(1),
+  "email": zod.string().optional(),
+  "ticketType": zod.string().min(1),
+  "qrId": zod.string().optional()
+})
+
+export const CreateAttendeeResponse = zod.object({
+  "id": zod.number(),
+  "qrId": zod.string(),
+  "name": zod.string(),
+  "email": zod.string().nullish(),
+  "ticketType": zod.string(),
+  "checkedInAt": zod.coerce.date().nullable(),
+  "createdAt": zod.coerce.date()
+})
+
+
+/**
  * @summary Import attendees from a CSV-shaped list
  */
 

@@ -22,6 +22,7 @@ import type {
 import type {
   Attendee,
   AttendeeImportInput,
+  AttendeeInput,
   AuthResponse,
   AuthUser,
   CheckInInput,
@@ -441,6 +442,77 @@ export function useListAttendees<TData = Awaited<ReturnType<typeof listAttendees
 
 
 
+
+export const getCreateAttendeeUrl = () => {
+
+
+
+
+  return `/api/attendees/create`
+}
+
+/**
+ * @summary Manually create a single attendee
+ */
+export const createAttendee = async (attendeeInput: AttendeeInput, options?: Parameters<typeof customFetch>[1]): Promise<Attendee> => {
+
+  return customFetch<Attendee>(getCreateAttendeeUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(attendeeInput)
+  }
+);}
+
+
+
+
+
+export const getCreateAttendeeMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAttendee>>, TError,{data: BodyType<AttendeeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createAttendee>>, TError,{data: BodyType<AttendeeInput>}, TContext> => {
+
+const mutationKey = ['createAttendee'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createAttendee>>, {data: BodyType<AttendeeInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  createAttendee(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateAttendeeMutationResult = NonNullable<Awaited<ReturnType<typeof createAttendee>>>
+    export type CreateAttendeeMutationBody = BodyType<AttendeeInput>
+    export type CreateAttendeeMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Manually create a single attendee
+ */
+export const useCreateAttendee = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAttendee>>, TError,{data: BodyType<AttendeeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createAttendee>>,
+        TError,
+        {data: BodyType<AttendeeInput>},
+        TContext
+      > => {
+      return useMutation(getCreateAttendeeMutationOptions(options));
+    }
 
 export const getImportAttendeesUrl = () => {
 
